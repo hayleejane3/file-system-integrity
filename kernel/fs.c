@@ -425,7 +425,7 @@ readi(struct inode *ip, char *dst, uint off, uint n)
     // Calculate the checksum
     checksum = bp->data[0];
     for (i = 1; i < 512; i++) {
-      checksum = checksum ^ data[i];
+      checksum = checksum ^ bp->data[i];
     }
 
     // Store checksum in first byte
@@ -488,7 +488,7 @@ writei(struct inode *ip, char *src, uint off, uint n)
     // Calculate the checksum
     checksum = bp->data[0];
     for (i = 1; i < 512; i++) {
-      checksum = checksum ^ data[i];
+      checksum = checksum ^ bp->data[i];
     }
 
     // Store checksum in first byte
