@@ -388,6 +388,31 @@ stati(struct inode *ip, struct stat *st)
   st->type = ip->type;
   st->nlink = ip->nlink;
   st->size = ip->size;
+
+  // For checksum
+  int i;
+  struct buf *bp;
+  char temp_checksum, checksum = 0;
+  uint num_blocks = ip->size/BSIZE;
+  if (ip->size % BSIZE != 0) {
+    num_blocks++;
+  }
+  if (ip->type == T_CHECKED) {
+    for (i = 0; i < num_blocks; i++) {
+      bp = bread(ip->dev, bmap(ip, i) &
+           (ip->type == T_CHECKED ? 0x00ffffff : 0xffffffff));
+
+      // Calculate the checksum
+      temp_checksum = bp->data[0];
+      for (i = 1; i < 512; i++) {
+       temp_checksum = temp_checksum ^ bp->data[i];
+      }
+      checksum = checksum ^ temp_checksum;
+
+      brelse(bp);
+    }
+  }
+  st->checksum = checksum;
 }
 
 // Read data from inode.
