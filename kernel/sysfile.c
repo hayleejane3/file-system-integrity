@@ -49,7 +49,7 @@ sys_dup(void)
 {
   struct file *f;
   int fd;
-  
+
   if(argfd(0, 0, &f) < 0)
     return -1;
   if((fd=fdalloc(f)) < 0)
@@ -87,7 +87,7 @@ sys_close(void)
 {
   int fd;
   struct file *f;
-  
+
   if(argfd(0, &fd, &f) < 0)
     return -1;
   proc->ofile[fd] = 0;
@@ -100,7 +100,7 @@ sys_fstat(void)
 {
   struct file *f;
   struct stat *st;
-  
+
   if(argfd(0, 0, &f) < 0 || argptr(1, (void*)&st, sizeof(*st)) < 0)
     return -1;
   return filestat(f, st);
@@ -224,7 +224,8 @@ create(char *path, short type, short major, short minor)
   if((ip = dirlookup(dp, name, &off)) != 0){
     iunlockput(dp);
     ilock(ip);
-    if(type == T_FILE && ip->type == T_FILE)
+    if((type == T_FILE && ip->type == T_FILE) ||
+        (type == T_CHECKED && ip->type == T_FILE))
       return ip;
     iunlockput(ip);
     return 0;
@@ -265,8 +266,14 @@ sys_open(void)
   if(argstr(0, &path) < 0 || argint(1, &omode) < 0)
     return -1;
   if(omode & O_CREATE){
-    if((ip = create(path, T_FILE, 0, 0)) == 0)
-      return -1;
+    if (omode & O_CHECKED) {
+      if((ip = create(path, T_CHECKED, 0, 0)) == 0)
+        return -1;
+    }
+    else {
+      if((ip = create(path, T_FILE, 0, 0)) == 0)
+        return -1;
+    }
   } else {
     if((ip = namei(path)) == 0)
       return -1;
@@ -312,7 +319,7 @@ sys_mknod(void)
   char *path;
   int len;
   int major, minor;
-  
+
   if((len=argstr(0, &path)) < 0 ||
      argint(1, &major) < 0 ||
      argint(2, &minor) < 0 ||

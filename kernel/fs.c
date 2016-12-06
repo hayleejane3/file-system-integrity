@@ -6,7 +6,7 @@
 //
 // Disk layout is: superblock, inodes, block in-use bitmap, data blocks.
 //
-// This file contains the low-level file system manipulation 
+// This file contains the low-level file system manipulation
 // routines.  The (higher-level) system call implementations
 // are in sysfile.c.
 
@@ -29,7 +29,7 @@ static void
 readsb(int dev, struct superblock *sb)
 {
   struct buf *bp;
-  
+
   bp = bread(dev, 1);
   memmove(sb, bp->data, sizeof(*sb));
   brelse(bp);
@@ -40,14 +40,14 @@ static void
 bzero(int dev, int bno)
 {
   struct buf *bp;
-  
+
   bp = bread(dev, bno);
   memset(bp->data, 0, BSIZE);
   bwrite(bp);
   brelse(bp);
 }
 
-// Blocks. 
+// Blocks.
 
 // Allocate a disk block.
 static uint
@@ -107,7 +107,7 @@ bfree(int dev, uint b)
 // the superblock.  The kernel keeps a cache of the in-use
 // on-disk structures to provide a place for synchronizing access
 // to inodes shared between multiple processes.
-// 
+//
 // ip->ref counts the number of pointer references to this cached
 // inode; references are typically kept in struct file and in proc->cwd.
 // When ip->ref falls to zero, the inode is no longer cached.
@@ -116,15 +116,15 @@ bfree(int dev, uint b)
 // Processes are only allowed to read and write inode
 // metadata and contents when holding the inode's lock,
 // represented by the I_BUSY flag in the in-memory copy.
-// Because inode locks are held during disk accesses, 
+// Because inode locks are held during disk accesses,
 // they are implemented using a flag rather than with
 // spin locks.  Callers are responsible for locking
 // inodes before passing them to routines in this file; leaving
 // this responsibility with the caller makes it possible for them
 // to create arbitrarily-sized atomic operations.
 //
-// To give maximum control over locking to the callers, 
-// the routines in this file that return inode pointers 
+// To give maximum control over locking to the callers,
+// the routines in this file that return inode pointers
 // return pointers to *unlocked* inodes.  It is the callers'
 // responsibility to lock them before using them.  A non-zero
 // ip->ref keeps these unlocked inodes in the cache.
@@ -311,7 +311,7 @@ iunlockput(struct inode *ip)
 //
 // The contents (data) associated with each inode is stored
 // in a sequence of blocks on the disk.  The first NDIRECT blocks
-// are listed in ip->addrs[].  The next NINDIRECT blocks are 
+// are listed in ip->addrs[].  The next NINDIRECT blocks are
 // listed in the block ip->addrs[NDIRECT].
 
 // Return the disk block address of the nth block in inode ip.
@@ -362,7 +362,7 @@ itrunc(struct inode *ip)
       ip->addrs[i] = 0;
     }
   }
-  
+
   if(ip->addrs[NDIRECT]){
     bp = bread(ip->dev, ip->addrs[NDIRECT]);
     a = (uint*)bp->data;
@@ -414,6 +414,39 @@ readi(struct inode *ip, char *dst, uint off, uint n)
     memmove(dst, bp->data + off%BSIZE, m);
     brelse(bp);
   }
+
+  // Checksum variables
+  char checksum;
+  int i;
+  uint *data;
+  struct buf *indirect_bp;
+
+  if (ip->type == T_CHECKED) {
+    // Calculate the checksum
+    checksum = bp->data[0];
+    for (i = 1; i < 512; i++) {
+      checksum = checksum ^ data[i];
+    }
+
+    // Store checksum in first byte
+    if (off/BSIZE < NDIRECT) {  // Direct
+      ip->addrs[off/BSIZE] = ip->addrs[off/BSIZE] & 0xff000000;
+      // If checksum values don't match. Note: XOR is equivalent to !=
+      if (ip->addrs[off/BSIZE] ^ (checksum << 24)) {
+        return -1;
+      }
+    } else {  // Indirect
+      indirect_bp = bread(ip->dev, ip->addrs[NDIRECT]);
+      data = (uint*) indirect_bp->data;
+      data[off/BSIZE - NDIRECT] = data[off/BSIZE - NDIRECT] & 0x00ffffff;
+      if (data[off/BSIZE - NDIRECT] ^ (checksum << 24)) {
+        brelse(indirect_bp);
+        return -1;
+      }
+      brelse(indirect_bp);
+    }
+  }
+
   return n;
 }
 
@@ -435,12 +468,41 @@ writei(struct inode *ip, char *src, uint off, uint n)
   if(off + n > MAXFILE*BSIZE)
     n = MAXFILE*BSIZE - off;
 
+  // Checksum variables
+  char checksum;
+  int i;
+  uint *data;
+  struct buf *indirect_bp;
+
   for(tot=0; tot<n; tot+=m, off+=m, src+=m){
-    bp = bread(ip->dev, bmap(ip, off/BSIZE));
+    // Clear the first byte if type is T_CHECKED (for checksum). Leave 3 byte data
+    bp = bread(ip->dev, bmap(ip, off/BSIZE) &
+         (ip->type == T_CHECKED ? 0x00ffffff : 0xffffffff));
     m = min(n - tot, BSIZE - off%BSIZE);
     memmove(bp->data + off%BSIZE, src, m);
     bwrite(bp);
     brelse(bp);
+  }
+
+  if (ip->type == T_CHECKED) {
+    // Calculate the checksum
+    checksum = bp->data[0];
+    for (i = 1; i < 512; i++) {
+      checksum = checksum ^ data[i];
+    }
+
+    // Store checksum in first byte
+    if (off/BSIZE < NDIRECT) {  // Direct
+      ip->addrs[off/BSIZE] = ip->addrs[off/BSIZE] & 0x00ffffff;
+      ip->addrs[off/BSIZE] = ip->addrs[off/BSIZE] | (checksum << 24);
+    } else {  // Indirect
+      indirect_bp = bread(ip->dev, ip->addrs[NDIRECT]);
+      data = (uint*) indirect_bp->data;
+      data[off/BSIZE - NDIRECT] = data[off/BSIZE - NDIRECT] & 0x00ffffff;
+      data[off/BSIZE - NDIRECT] = data[off/BSIZE - NDIRECT] | (checksum << 24);
+      bwrite(indirect_bp);
+      brelse(indirect_bp);
+    }
   }
 
   if(n > 0 && off > ip->size){
@@ -518,7 +580,7 @@ dirlink(struct inode *dp, char *name, uint inum)
   de.inum = inum;
   if(writei(dp, (char*)&de, off, sizeof(de)) != sizeof(de))
     panic("dirlink");
-  
+
   return 0;
 }
 
