@@ -21,6 +21,9 @@
 #include "fs.h"
 #include "file.h"
 
+#define AND_ADDR 0x00ffffff
+#define AND_CHECKSUM 0xff000000
+
 #define min(a, b) ((a) < (b) ? (a) : (b))
 static void itrunc(struct inode*);
 
@@ -325,6 +328,9 @@ bmap(struct inode *ip, uint bn)
   if(bn < NDIRECT){
     if((addr = ip->addrs[bn]) == 0)
       ip->addrs[bn] = addr = balloc(ip->dev);
+    if (ip->type == T_CHECKED) {
+      addr = addr & AND_ADDR;
+    }
     return addr;
   }
   bn -= NDIRECT;
@@ -340,6 +346,9 @@ bmap(struct inode *ip, uint bn)
       bwrite(bp);
     }
     brelse(bp);
+    if (ip->type == T_CHECKED) {
+      addr = addr & AND_ADDR;
+    }
     return addr;
   }
 
@@ -358,7 +367,12 @@ itrunc(struct inode *ip)
 
   for(i = 0; i < NDIRECT; i++){
     if(ip->addrs[i]){
-      bfree(ip->dev, ip->addrs[i]);
+      if (ip->type == T_CHECKED) {
+        bfree(ip->dev, ip->addrs[i]);
+      } else {
+        uint addrs = (ip->addrs[i]) & AND_ADDR;
+        bfree(ip->dev, addrs);
+      }
       ip->addrs[i] = 0;
     }
   }
@@ -367,8 +381,14 @@ itrunc(struct inode *ip)
     bp = bread(ip->dev, ip->addrs[NDIRECT]);
     a = (uint*)bp->data;
     for(j = 0; j < NINDIRECT; j++){
-      if(a[j])
-        bfree(ip->dev, a[j]);
+      if(a[j]){
+        if (ip->type == T_CHECKED) {
+          bfree(ip->dev, a[j]);
+        } else {
+          uint addrs = (a[j]) & AND_ADDR;
+          bfree(ip->dev, addrs);
+        }
+      }
     }
     brelse(bp);
     bfree(ip->dev, ip->addrs[NDIRECT]);
@@ -391,26 +411,28 @@ stati(struct inode *ip, struct stat *st)
 
   // For checksum
   int i;
-  struct buf *bp;
-  char temp_checksum, checksum = 0;
+  struct buf *indirect_bp;
+  uchar temp_checksum, checksum = 0;
   uint num_blocks = ip->size/BSIZE;
   if (ip->size % BSIZE != 0) {
     num_blocks++;
   }
+
+  // Calculate checksum
   if (ip->type == T_CHECKED) {
-    for (i = 0; i < num_blocks; i++) {
-      bp = bread(ip->dev, bmap(ip, i) &
-           (ip->type == T_CHECKED ? 0x00ffffff : 0xffffffff));
-
-      // Calculate the checksum
-      temp_checksum = bp->data[0];
-      for (i = 1; i < 512; i++) {
-       temp_checksum = temp_checksum ^ bp->data[i];
-      }
-      checksum = checksum ^ temp_checksum;
-
-      brelse(bp);
+    checksum = (ip->addrs[0] >> 24);
+    for (i = 1; i < 512; i++) {
+      checksum = checksum ^ (ip->addrs[i] >> 24);
     }
+
+    indirect_bp = bread(ip->dev, ip->addrs[NDIRECT]);
+    temp_checksum = (uchar)indirect_bp->data[0];
+    for (i = 1; i < NINDIRECT; i++) {
+      temp_checksum = temp_checksum ^ (uchar)indirect_bp->data[i];
+    }
+    checksum = checksum ^ temp_checksum;
+
+    brelse(indirect_bp);
   }
   st->checksum = checksum;
 }
@@ -433,45 +455,41 @@ readi(struct inode *ip, char *dst, uint off, uint n)
   if(off + n > ip->size)
     n = ip->size - off;
 
-  for(tot=0; tot<n; tot+=m, off+=m, dst+=m){
-    bp = bread(ip->dev, bmap(ip, off/BSIZE));
-    m = min(n - tot, BSIZE - off%BSIZE);
-    memmove(dst, bp->data + off%BSIZE, m);
-    brelse(bp);
-  }
-
   // Checksum variables
-  char checksum;
+  uchar checksum;
   int i;
   uint *data;
   struct buf *indirect_bp;
 
-  if (ip->type == T_CHECKED) {
-    // Calculate the checksum
-    checksum = bp->data[0];
-    for (i = 1; i < 512; i++) {
-      checksum = checksum ^ bp->data[i];
-    }
+  for(tot=0; tot<n; tot+=m, off+=m, dst+=m){
+    bp = bread(ip->dev, bmap(ip, off/BSIZE));
+    m = min(n - tot, BSIZE - off%BSIZE);
+    memmove(dst, bp->data + off%BSIZE, m);
 
-    // Store checksum in first byte
-    if (off/BSIZE < NDIRECT) {  // Direct
-      ip->addrs[off/BSIZE] = ip->addrs[off/BSIZE] & 0xff000000;
-      // If checksum values don't match. Note: XOR is equivalent to !=
-      if (ip->addrs[off/BSIZE] ^ (checksum << 24)) {
-        return -1;
+    if (ip->type == T_CHECKED) {
+      // Calculate the checksum
+      checksum = (uchar)bp->data[0];
+      for (i = 1; i < 512; i++) {
+        checksum = checksum ^ (uchar)bp->data[i];
       }
-    } else {  // Indirect
-      indirect_bp = bread(ip->dev, ip->addrs[NDIRECT]);
-      data = (uint*) indirect_bp->data;
-      data[off/BSIZE - NDIRECT] = data[off/BSIZE - NDIRECT] & 0x00ffffff;
-      if (data[off/BSIZE - NDIRECT] ^ (checksum << 24)) {
+
+      checksum = checksum & 0x000000ff;
+      if (off/BSIZE < NDIRECT) {  // Direct
+        if ((ip->addrs[off/BSIZE] >> 24) != (uint)checksum) {
+          return -1;
+        }
+      } else {  // Indirect
+        indirect_bp = bread(ip->dev, ip->addrs[NDIRECT]);
+        data = (uint*)indirect_bp->data;
+        if ((data[off/BSIZE - NDIRECT] >> 24) != (uint)checksum) {
+          brelse(indirect_bp);
+          return -1;
+        }
         brelse(indirect_bp);
-        return -1;
       }
-      brelse(indirect_bp);
     }
+    brelse(bp);
   }
-
   return n;
 }
 
@@ -494,40 +512,46 @@ writei(struct inode *ip, char *src, uint off, uint n)
     n = MAXFILE*BSIZE - off;
 
   // Checksum variables
-  char checksum;
+  uchar checksum;
   int i;
   uint *data;
   struct buf *indirect_bp;
 
   for(tot=0; tot<n; tot+=m, off+=m, src+=m){
     // Clear the first byte if type is T_CHECKED (for checksum). Leave 3 byte data
-    bp = bread(ip->dev, bmap(ip, off/BSIZE) &
-         (ip->type == T_CHECKED ? 0x00ffffff : 0xffffffff));
+    bp = bread(ip->dev, bmap(ip, off/BSIZE));
     m = min(n - tot, BSIZE - off%BSIZE);
     memmove(bp->data + off%BSIZE, src, m);
+
+    if (ip->type == T_CHECKED) {
+      // Calculate the checksum
+      checksum = (uchar)bp->data[0];
+      for (i = 1; i < 512; i++) {
+        checksum = checksum ^ (uchar)bp->data[i];
+      }
+
+      // Store checksum in first byte
+      checksum = checksum & 0x000000ff;
+      if (off/BSIZE < NDIRECT) {  // Direct
+        cprintf("before: %d\t", ip->addrs[off/BSIZE]);
+        ip->addrs[off/BSIZE] = ip->addrs[off/BSIZE] & AND_ADDR;
+        ip->addrs[off/BSIZE] = ip->addrs[off/BSIZE] | (checksum << 24);
+        cprintf("after write:\n");
+        cprintf("\t stored: %d\t", (ip->addrs[off/BSIZE]));
+        cprintf("checksum: %d\t", (checksum));
+        cprintf("stored cs: %d\n", (ip->addrs[off/BSIZE] & AND_CHECKSUM));
+      } else {  // Indirect
+        indirect_bp = bread(ip->dev, ip->addrs[NDIRECT]);
+        data = (uint*)indirect_bp->data;
+        data[off/BSIZE - NDIRECT] = data[off/BSIZE - NDIRECT] & AND_ADDR;
+        data[off/BSIZE - NDIRECT] = data[off/BSIZE - NDIRECT] | (checksum << 24);
+        bwrite(indirect_bp);
+        brelse(indirect_bp);
+      }
+    }
+
     bwrite(bp);
     brelse(bp);
-  }
-
-  if (ip->type == T_CHECKED) {
-    // Calculate the checksum
-    checksum = bp->data[0];
-    for (i = 1; i < 512; i++) {
-      checksum = checksum ^ bp->data[i];
-    }
-
-    // Store checksum in first byte
-    if (off/BSIZE < NDIRECT) {  // Direct
-      ip->addrs[off/BSIZE] = ip->addrs[off/BSIZE] & 0x00ffffff;
-      ip->addrs[off/BSIZE] = ip->addrs[off/BSIZE] | (checksum << 24);
-    } else {  // Indirect
-      indirect_bp = bread(ip->dev, ip->addrs[NDIRECT]);
-      data = (uint*) indirect_bp->data;
-      data[off/BSIZE - NDIRECT] = data[off/BSIZE - NDIRECT] & 0x00ffffff;
-      data[off/BSIZE - NDIRECT] = data[off/BSIZE - NDIRECT] | (checksum << 24);
-      bwrite(indirect_bp);
-      brelse(indirect_bp);
-    }
   }
 
   if(n > 0 && off > ip->size){
