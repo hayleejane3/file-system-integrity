@@ -412,7 +412,7 @@ stati(struct inode *ip, struct stat *st)
   // For checksum
   int i;
   struct buf *indirect_bp;
-  uchar temp_checksum, checksum = 0;
+  uchar checksum = 0;
   uint num_blocks = ip->size/BSIZE;
   if (ip->size % BSIZE != 0) {
     num_blocks++;
@@ -426,11 +426,9 @@ stati(struct inode *ip, struct stat *st)
     }
 
     indirect_bp = bread(ip->dev, ip->addrs[NDIRECT]);
-    temp_checksum = (uchar)indirect_bp->data[0];
-    for (i = 1; i < NINDIRECT; i++) {
-      temp_checksum = temp_checksum ^ (uchar)indirect_bp->data[i];
+    for (i = 0; i < NINDIRECT; i++) {
+      checksum = checksum ^ ((((uint*)indirect_bp->data)[i]) >> 24);
     }
-    checksum = checksum ^ temp_checksum;
 
     brelse(indirect_bp);
   }
