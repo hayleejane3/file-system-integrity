@@ -531,13 +531,8 @@ writei(struct inode *ip, char *src, uint off, uint n)
       // Store checksum in first byte
       checksum = checksum & 0x000000ff;
       if (off/BSIZE < NDIRECT) {  // Direct
-        cprintf("before: %d\t", ip->addrs[off/BSIZE]);
         ip->addrs[off/BSIZE] = ip->addrs[off/BSIZE] & AND_ADDR;
         ip->addrs[off/BSIZE] = ip->addrs[off/BSIZE] | (checksum << 24);
-        cprintf("after write:\n");
-        cprintf("\t stored: %d\t", (ip->addrs[off/BSIZE]));
-        cprintf("checksum: %d\t", (checksum));
-        cprintf("stored cs: %d\n", (ip->addrs[off/BSIZE] & AND_CHECKSUM));
       } else {  // Indirect
         indirect_bp = bread(ip->dev, ip->addrs[NDIRECT]);
         data = (uint*)indirect_bp->data;
